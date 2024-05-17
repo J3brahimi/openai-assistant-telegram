@@ -7,98 +7,51 @@ use async_openai::{
 };
 use flowsnet_platform_sdk::logger;
 use tg_flows::{listen_to_update, update_handler, Telegram, UpdateKind};
-use reqwest::Client as ReqwestClient;
-use std::env;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 
 #[no_mangle]
 #[tokio::main(flavor = "current_thread")]
 pub async fn on_deploy() {
     logger::init();
 
-    let telegram_token = env::var("telegram_token").unwrap();
+    // create_thread().await;
+
+    let telegram_token = std::env::var("telegram_token").unwrap();
     listen_to_update(telegram_token).await;
 }
 
 #[update_handler]
 async fn handler(update: tg_flows::Update) {
     logger::init();
-    let telegram_token = env::var("telegram_token").unwrap();
+    let telegram_token = std::env::var("telegram_token").unwrap();
     let tele = Telegram::new(telegram_token);
 
     if let UpdateKind::Message(msg) = update.kind {
+        let text = msg.text().unwrap_or("");
         let chat_id = msg.chat.id;
 
-        if let Some(voice) = msg.voice() {
-            let file_id = voice.file.file_id.clone();
-            if let Some(file_path) = download_voice_file(&tele, &file_id).await {
-                let text = transcribe_audio(file_path).await;
-                let response = run_message(&text).await;
-                _ = tele.send_message(chat_id, response).await;
+        let thread_id = match store_flows::get(chat_id.to_string().as_str()) {
+            Some(ti) => match text == "/restart" {
+                true => {
+                    delete_thread(ti.as_str().unwrap()).await;
+                    store_flows::del(chat_id.to_string().as_str());
+                    return;
+                }
+                false => ti.as_str().unwrap().to_owned(),
+            },
+            None => {
+                let ti = create_thread().await;
+                store_flows::set(
+                    chat_id.to_string().as_str(),
+                    serde_json::Value::String(ti.clone()),
+                    None,
+                );
+                ti
             }
-        } else if let Some(text) = msg.text() {
-            let thread_id = match store_flows::get(chat_id.to_string().as_str()) {
-                Some(ti) => {
-                    if text == "/restart" {
-                        delete_thread(ti.as_str().unwrap()).await;
-                        store_flows::del(chat_id.to_string().as_str());
-                        return;
-                    } else {
-                        ti.as_str().unwrap().to_owned()
-                    }
-                }
-                None => {
-                    let ti = create_thread().await;
-                    store_flows::set(
-                        chat_id.to_string().as_str(),
-                        serde_json::Value::String(ti.clone()),
-                        None,
-                    );
-                    ti
-                }
-            };
+        };
 
-            let response = run_message(text).await;
-            _ = tele.send_message(chat_id, response).await;
-        }
+        let response = run_message(thread_id.as_str(), String::from(text)).await;
+        _ = tele.send_message(chat_id, response);
     }
-}
-
-async fn download_voice_file(tele: &Telegram, file_id: &str) -> Option<String> {
-    let file_info = tele.get_file(file_id.to_string()).ok()?;
-    let file_path = format!("https://api.telegram.org/file/bot{}/{}", env::var("telegram_token").unwrap(), file_info.file_path);
-    let file_name = format!("/tmp/{}.ogg", file_id);
-
-    let client = ReqwestClient::new();
-    let mut response = client.get(&file_path).send().await.ok()?;
-    let mut file = File::create(&file_name).await.ok()?;
-    while let Some(chunk) = response.chunk().await.ok()? {
-        file.write_all(&chunk).await.ok()?;
-    }
-
-    Some(file_name)
-}
-
-async fn transcribe_audio(file_path: String) -> String {
-    let client = ReqwestClient::new();
-    let file = tokio::fs::read(file_path.clone()).await.unwrap();
-
-    let form = reqwest::multipart::Form::new()
-        .file("file", &file_path)
-        .unwrap()
-        .text("model", "whisper-1");
-
-    let response = client
-        .post("https://api.openai.com/v1/audio/transcriptions")
-        .header("Authorization", format!("Bearer {}", env::var("OPENAI_API_KEY").unwrap()))
-        .multipart(form)
-        .send()
-        .await
-        .unwrap();
-
-    let transcription: serde_json::Value = response.json().await.unwrap();
-    transcription["text"].as_str().unwrap().to_string()
 }
 
 async fn create_thread() -> String {
@@ -130,16 +83,12 @@ async fn delete_thread(thread_id: &str) {
     }
 }
 
-async fn run_message(text: &str) -> String {
+async fn run_message(thread_id: &str, text: String) -> String {
     let client = Client::new();
-    let assistant_id = env::var("ASSISTANT_ID").unwrap();
-    let thread_id = create_thread().await;
+    let assistant_id = std::env::var("ASSISTANT_ID").unwrap();
 
-    let create_message_request = CreateMessageRequestArgs::default()
-        .content(text.to_string())
-        .build()
-        .unwrap();
-
+    let mut create_message_request = CreateMessageRequestArgs::default().build().unwrap();
+    create_message_request.content = text;
     client
         .threads()
         .messages(&thread_id)
@@ -147,10 +96,8 @@ async fn run_message(text: &str) -> String {
         .await
         .unwrap();
 
-    let create_run_request = CreateRunRequestArgs::default()
-        .assistant_id(assistant_id)
-        .build()
-        .unwrap();
+    let mut create_run_request = CreateRunRequestArgs::default().build().unwrap();
+    create_run_request.assistant_id = assistant_id;
     let run_id = client
         .threads()
         .runs(&thread_id)
@@ -182,7 +129,7 @@ async fn run_message(text: &str) -> String {
     }
 
     match result {
-        Some(r) => r.to_string(),
+        Some(r) => String::from(r),
         None => {
             let mut thread_messages = client
                 .threads()
