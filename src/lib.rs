@@ -31,13 +31,11 @@ async fn handler(update: tg_flows::Update) {
         let chat_id = msg.chat.id;
 
         if let Some(voice) = msg.voice() {
-            let file_id = voice.file_id.clone();
-            let file_path = download_voice_file(&tele, &file_id).await;
-
-            if let Some(file_path) = file_path {
+            let file_id = voice.file.file_id.clone();
+            if let Some(file_path) = download_voice_file(&tele, &file_id).await {
                 let text = transcribe_audio(file_path).await;
                 let response = run_message(&text).await;
-                _ = tele.send_message(chat_id, response);
+                _ = tele.send_message(chat_id, response).await;
             }
         } else if let Some(text) = msg.text() {
             let thread_id = match store_flows::get(chat_id.to_string().as_str()) {
@@ -62,16 +60,16 @@ async fn handler(update: tg_flows::Update) {
             };
 
             let response = run_message(text).await;
-            _ = tele.send_message(chat_id, response);
+            _ = tele.send_message(chat_id, response).await;
         }
     }
 }
 
 async fn download_voice_file(tele: &Telegram, file_id: &str) -> Option<String> {
-    let file_info = tele.get_file(file_id).await.ok()?;
+    let file_info = tele.get_file(file_id.to_string()).ok()?;
     let file_path = format!("https://api.telegram.org/file/bot{}/{}", env::var("telegram_token").unwrap(), file_info.file_path);
     let file_name = format!("/tmp/{}.ogg", file_id);
-    
+
     let client = ReqwestClient::new();
     let mut response = client.get(&file_path).send().await.ok()?;
     let mut file = File::create(&file_name).await.ok()?;
@@ -83,8 +81,8 @@ async fn download_voice_file(tele: &Telegram, file_id: &str) -> Option<String> {
 }
 
 async fn transcribe_audio(file_path: String) -> String {
-    let client = Client::new();
-    let file = tokio::fs::read(file_path).await.unwrap();
+    let client = ReqwestClient::new();
+    let file = tokio::fs::read(file_path.clone()).await.unwrap();
 
     let form = reqwest::multipart::Form::new()
         .file("file", &file_path)
@@ -135,8 +133,9 @@ async fn delete_thread(thread_id: &str) {
 async fn run_message(text: &str) -> String {
     let client = Client::new();
     let assistant_id = env::var("ASSISTANT_ID").unwrap();
+    let thread_id = create_thread().await;
 
-    let create_message_request = CreateMessageRequestArgs::builder()
+    let create_message_request = CreateMessageRequestArgs::default()
         .content(text.to_string())
         .build()
         .unwrap();
@@ -148,7 +147,7 @@ async fn run_message(text: &str) -> String {
         .await
         .unwrap();
 
-    let create_run_request = CreateRunRequestArgs::builder()
+    let create_run_request = CreateRunRequestArgs::default()
         .assistant_id(assistant_id)
         .build()
         .unwrap();
