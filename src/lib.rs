@@ -9,8 +9,8 @@ use flowsnet_platform_sdk::logger;
 use tg_flows::{listen_to_update, update_handler, Telegram, UpdateKind};
 use reqwest::Client as ReqwestClient;
 use std::env;
-use std::fs::File;
-use std::io::Write;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 
 #[no_mangle]
 #[tokio::main(flavor = "current_thread")]
@@ -74,9 +74,9 @@ async fn download_voice_file(tele: &Telegram, file_id: &str) -> Option<String> {
     
     let client = ReqwestClient::new();
     let mut response = client.get(&file_path).send().await.ok()?;
-    let mut file = File::create(&file_name).ok()?;
+    let mut file = File::create(&file_name).await.ok()?;
     while let Some(chunk) = response.chunk().await.ok()? {
-        file.write_all(&chunk).ok()?;
+        file.write_all(&chunk).await.ok()?;
     }
 
     Some(file_name)
